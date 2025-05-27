@@ -54,7 +54,7 @@ def create_layout():
                         value='All', clearable=False, style={'width': '200px'}
                     ),
                     html.Br(), html.Label('그리드 사이즈:'), 
-                    dcc.Input(id='heatmap-grid-size', type='number', value=30, min=5, step=1, style={'width': '100px'})
+                    dcc.Input(id='heatmap-grid-size', type='number', value=10, min=5, step=1, style={'width': '100px'})
                 ], style={'margin': '10px'}),
                 dcc.Graph(id='heatmap')
             ]),

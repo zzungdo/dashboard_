@@ -122,29 +122,40 @@ def compute_image_summary(df):
     ).reset_index()
 
 # *히트맵 관련 함수
-def compute_heatmap_data(df, grid_size=30):
+def compute_heatmap_data(df, grid_size=10):
+
     df = df.dropna(subset=['xmin_norm', 'xmax_norm', 'ymin_norm', 'ymax_norm'])
 
     heatmap = np.zeros((grid_size, grid_size), dtype=int)
 
     for _, row in df.iterrows():
-        xmin_i = int(row['xmin_norm'] * grid_size)
-        xmax_i = int(row['xmax_norm'] * grid_size)
-        ymin_i = int(row['ymin_norm'] * grid_size)
-        ymax_i = int(row['ymax_norm'] * grid_size)
+        # *좌표 → 그리드 인덱스로 변환 (경계 포함 + 안전 처리)
+        xmin_i = int(np.floor(row['xmin_norm'] * grid_size))
+        xmax_i = int(np.floor(row['xmax_norm'] * grid_size))
+        ymin_i = int(np.floor(row['ymin_norm'] * grid_size))
+        ymax_i = int(np.floor(row['ymax_norm'] * grid_size))
 
-        for i in range(max(0, xmin_i), min(grid_size, xmax_i+1)):
-            for j in range(max(0, ymin_i), min(grid_size, ymax_i+1)):
-                heatmap[i,j] += 1
+        # *경계 보정 (grid index 범위: 0 ~ grid_size - 1)
+        xmin_i = max(0, min(xmin_i, grid_size - 1))
+        xmax_i = max(0, min(xmax_i, grid_size - 1))
+        ymin_i = max(0, min(ymin_i, grid_size - 1))
+        ymax_i = max(0, min(ymax_i, grid_size - 1))
 
+        # *bbox가 덮는 모든 셀에 +1
+        for i in range(xmin_i, xmax_i + 1):
+            for j in range(ymin_i, ymax_i + 1):
+                heatmap[i, j] += 1
+
+    # *시각화를 위한 DataFrame 변환
     x, y = np.meshgrid(np.arange(grid_size), np.arange(grid_size))
     df_heat = pd.DataFrame({
         'grid_x': x.flatten(),
         'grid_y': y.flatten(),
         'box_count': heatmap.T.flatten()
-        })
+    })
 
-    return df_heat[df_heat['box_count'] > 0]
+    return df_heat[df_heat['box_count'] > 0].copy()
+
 
 # *바운딩박스 시각화
 def draw_boxes(image_path, boxes, visible_classes=None, duplicate=False):
@@ -183,4 +194,3 @@ class_count_df.columns = ['class_name', 'count']
 pie_fig = px.pie(class_count_df, names='class_name', values='count', title='전체 바운딩박스에서 클래스별 비율')
 pie_fig.update_traces(pull=[0.05] * len(class_count_df), textposition='outside', textinfo='percent+label')
 pie_fig.update_layout(width=700, height=700)
-

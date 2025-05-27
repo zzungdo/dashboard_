@@ -152,33 +152,71 @@ def register_callbacks(app):
         fig.update_layout(margin=dict(l=20, r=20, t=50, b=20), height=600)
 
         return fig
-    
-    
+
     @app.callback(
-        Output('heatmap', 'figure'), # *히트맵 그래프
-        Input('heatmap-class-filter', 'value'), # *선택된 클래스
-        Input('heatmap-grid-size', 'value') # *그리드 해상도
+        Output('heatmap', 'figure'),
+        Input('heatmap-class-filter', 'value'),
+        Input('heatmap-grid-size', 'value')
     )
     def update_heatmap(selected_class, grid_size):
-        # *선택된 클래스만 필터링
+        # 클래스 필터링
         df = df_all if selected_class == 'All' else df_all[df_all['class'] == selected_class]
         df = df.dropna(subset=['xmin_norm', 'xmax_norm', 'ymin_norm', 'ymax_norm'])
 
-        # *그리드 셀별 bbox 카운팅
+        # 히트맵 데이터 계산
         data = compute_heatmap_data(df, grid_size)
 
         if data.empty:
             return px.imshow(np.zeros((10, 10)), title="히트맵 데이터 없음")
 
-        # *히트맵 시각화
-        fig = px.density_heatmap(
-            data, x='grid_x', y='grid_y', z='box_count', histfunc='avg',
-            nbinsx=grid_size, nbinsy=grid_size,
-            color_continuous_scale='RdBu',
-            title=f"히트맵 (바운딩박스 영역 기반): {selected_class}"
-        )
+        # 퍼센트 배열 만들기 (히트맵 형태로 reshape 필요)
+        total = data['box_count'].sum()
+        data['percent'] = (data['box_count'] / total * 100).round(2)
+        percent_matrix = np.full((grid_size, grid_size), "", dtype=object)
+        for _, row in data.iterrows():
+            x, y = int(row['grid_x']), int(row['grid_y'])
+            percent_matrix[y, x] = f"{row['percent']}%"
 
-        fig.update_yaxes(autorange='reversed')
+        # box_count 배열 만들기 (히트맵용)
+        heatmap_matrix = np.zeros((grid_size, grid_size))
+        for _, row in data.iterrows():
+            x, y = int(row['grid_x']), int(row['grid_y'])
+            heatmap_matrix[y, x] = row['box_count']
+
+        # 히트맵 생성
+        import plotly.graph_objects as go
+        fig = go.Figure(data=go.Heatmap(
+            z=heatmap_matrix,
+            text=percent_matrix,
+            texttemplate="%{text}",
+            textfont={"size": 12, "color": "black"},
+            colorscale="RdBu",
+            reversescale=True,
+            colorbar=dict(title="box_count"),
+            customdata=percent_matrix,
+            hovertemplate=" %{z} bboxes<br> %{customdata}% of total<extra></extra>",
+        ))
+
+        fig.update_layout(
+            title=f"히트맵 (바운딩박스 영역 기반): {selected_class}",
+            margin=dict(l=40, r=40, t=50, b=40),
+            height=600,
+        )
+        
+        fig.update_xaxes(
+            title="grid_x",
+            range=[-0.5, grid_size - 0.5],
+            constrain="domain",
+            tickmode="linear",
+            dtick=1,
+        )
+        fig.update_yaxes(
+            title="grid_y",
+            range=[grid_size - 0.5, -0.5],
+            constrain="domain",
+            tickmode="linear",
+            dtick=1,
+        )
         return fig
 
     @app.callback(
@@ -193,17 +231,23 @@ def register_callbacks(app):
         if current_tab != 'tab-heatmap' or not clickData:
             return []
         # *클릭된 셀의 좌표
-        gx, gy = clickData['points'][0]['x'], clickData['points'][0]['y']
+        gx = int(clickData['points'][0]['x'])
+        gy = int(clickData['points'][0]['y'])
         
         # *클래스 필터링
         df = df_all.copy() if sel_class == 'All' else df_all[df_all['class'] == sel_class]
 
         # *바운딩박스 중심좌표로 계산
-        df['grid_x'] = (df['center_x_norm'] * grid_size).astype(int)
-        df['grid_y'] = (df['center_y_norm'] * grid_size).astype(int)
-        
-        # *바운딩박스가 있는 이미지만 추출
-        matched = df[(df['grid_x'] == gx) & (df['grid_y'] == gy)]
+        x0 = gx / grid_size
+        x1 = (gx + 1) / grid_size
+        y0 = gy / grid_size
+        y1 = (gy + 1) / grid_size
+
+        matched = df[
+            (df['xmax_norm'] >= x0) & (df['xmin_norm'] <= x1) &
+            (df['ymax_norm'] >= y0) & (df['ymin_norm'] <= y1)
+        ]
+
         return [
             html.Img(
                 src=get_image_thumbnail(fname),
