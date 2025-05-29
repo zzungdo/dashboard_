@@ -2,6 +2,10 @@ from dash import Input, Output, State, ctx, dcc, html
 import dash
 import numpy as np
 from utils import *
+import json
+import time 
+
+duplicate_box_dict = {}
 
 # *한글,특수문자 경로 읽는 함수
 def imread_unicode(path):
@@ -15,22 +19,96 @@ def imread_unicode(path):
 
 def register_callbacks(app):
 
+    # @app.callback(
+    #     Output('store-paths', 'data'),
+    #     Input('btn-set-path', 'n_clicks'),
+    #     State('input-gt-path', 'value'),
+    #     State('input-img-path', 'value'),
+    #     prevent_initial_call=True
+    # )
+    # def update_paths(n, gt_path, img_path):
+    #     print("update_paths called", n, gt_path, img_path)
+    #     if gt_path and img_path:
+    #         print("경로 입력 정상! 반환")
+    #         return {'gt': gt_path, 'img': img_path}
+    #     print("입력 미존재")
+    #     return dash.no_update
+
+
     @app.callback(
-        Output('image-display', 'figure'), # *결과를 표시할 대상
-        Input('image-dropdown', 'value'), # *선택된 이미지 파일명
-        Input('class-visibility-filter', 'value'), # *표시할 클래스 목록
-        Input('main-tabs', 'value'), # *현재 선택된 탭
-        Input('duplicate-table', 'active_cell'), # *중복 검사 테이블의 선택 셀
-        State('duplicate-table', 'data'), # *중복 검사 결과 데이블 전체 데이터
-        State('duplicate-table', 'page_current'),# *현재 테이블 페이지 
-        State('duplicate-table', 'page_size'), # * 테이블 페이지당 행 수
+        Output('store-loading', 'data'),
+        Output('store-paths', 'data'),
+        Output('store-df-all', 'data'),
+        Output('summary-table', 'data'),
+        Output('class-summary-table', 'data'),
+        Output('class-visibility-filter', 'options'),
+        Output('class-visibility-filter', 'value'),
+        Input('btn-set-path', 'n_clicks'),
+        State('input-gt-path', 'value'),
+        State('input-img-path', 'value'),
+        prevent_initial_call=True
+    )
+    def handle_set_path(n, gt_path, img_path):
+        if not (gt_path and img_path):
+            # 모든 Output에 대해 dash.no_update 반환
+            return False, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update
+
+        # 1. 데이터 로딩
+        t0 = time.time()
+        df_all = load_all_gt(img_path, gt_path)
+        df_summary = compute_image_summary(df_all)
+        class_stats = df_all.groupby('class').agg(
+            count=('class', 'count'), image_count=('filename', pd.Series.nunique)
+        ).reset_index()
+        class_stats['avg_per_image'] = (class_stats['count'] / class_stats['image_count']).round(2)
+        class_stats['class_ratio_percent'] = (class_stats['count'] / len(df_all) * 100).round(2)
+        class_options = [{'label': c, 'value': c} for c in sorted(df_all['class'].unique())]
+        t1 = time.time()
+        print(f"[적용] 데이터 처리 소요 시간: {t1-t0:.2f}초")
+
+        return (
+            False,  # store-loading: 로딩 alert 해제
+            {'gt': gt_path, 'img': img_path},  # store-paths
+            df_all.to_json(date_format='iso', orient='split'),  # store-df-all
+            df_summary.to_dict('records'),  # summary-table
+            class_stats.to_dict('records'),  # class-summary-table
+            class_options,  # class-visibility-filter options
+            [c['value'] for c in class_options]  # class-visibility-filter value
+        )
+
+    # 로딩 alert는 이 store-loading 값에 따라 동작
+    @app.callback(
+        Output('loading-alert', 'style'),
+        Input('store-loading', 'data')
+    )
+    def show_loading_alert(is_loading):
+        if is_loading:
+            return {
+                'display': 'block', 'position': 'fixed', 'top': '40%', 'left': '50%',
+                'transform': 'translate(-50%, -50%)', 'backgroundColor': 'rgba(0,0,0,0.85)',
+                'color': 'white', 'fontSize': '2em', 'padding': '40px', 'zIndex': 2000, 'borderRadius': '12px'
+            }
+        else:
+            return {'display': 'none'}
+
+    @app.callback(
+        Output('image-display', 'figure'),
+        Input('image-dropdown', 'value'),
+        Input('class-visibility-filter', 'value'),
+        Input('main-tabs', 'value'),
+        Input('duplicate-table', 'active_cell'),
+        State('duplicate-table', 'data'),
+        State('duplicate-table', 'page_current'),
+        State('duplicate-table', 'page_size'),
+        Input('store-df-all', 'data'),
+        Input('store-paths', 'data'),
         prevent_initial_call=True
     )
     def update_image_figure(selected_image, visible_classes, current_tab,
-                            active_cell, dup_table_data, page_current, page_size):
+                           active_cell, dup_table_data, page_current, page_size,
+                           df_all_json, paths):
         global selected_bbox_index
-        # *클래스 통계 탭에서 이미지 표시 하지않음
-        if current_tab == 'tab-stats':
+        if not df_all_json or not paths:
             return dash.no_update
         
         # *이미지가 선택되지않았으면 텍스트 출력
@@ -53,7 +131,11 @@ def register_callbacks(app):
             return fig
 
         # *이미지 로딩
-        image_path = os.path.join(IMG_FOLDER, selected_image)
+        
+        df_all = pd.read_json(df_all_json, orient='split')
+        img_folder = paths['img']
+        
+        image_path = os.path.join(img_folder, selected_image)
         image = imread_unicode(image_path)
         if image is None:
             return px.imshow(np.zeros((100,100,3)))
@@ -128,39 +210,38 @@ def register_callbacks(app):
         return fig
 
     @app.callback(
-        Output('center-scatter', 'figure'), # *산점도 그래프
-        Input('main-tabs', 'value') # *현재 선택된 탭
+        Output('center-scatter', 'figure'),
+        Input('main-tabs', 'value'),
+        Input('store-df-all', 'data')
     )
-    def update_center_scatter(tab):
-        # *산점도 탭이 아니면 리턴
-        if tab != 'tab-analysis':
+    def update_center_scatter(tab, df_all_json):
+        if tab != 'tab-analysis' or not df_all_json:
             return dash.no_update
 
-        # *산점도 생성    
+        df_all = pd.read_json(df_all_json, orient='split')
         fig = px.scatter(
             df_all,
             x='bbox_width',
             y='bbox_height',
             color='class',
-            hover_data=['filename', 'class'], # *마우스 오버
+            hover_data=['filename', 'class'],
             title='바운딩박스 너비 vs 높이 산점도'
         )
-        # *산점도 포인트 크기
         fig.update_traces(marker=dict(size=8), selector=dict(mode='markers'))
-
-        # *여백,
         fig.update_layout(margin=dict(l=20, r=20, t=50, b=20), height=600)
-
         return fig
 
     @app.callback(
         Output('heatmap', 'figure'),
         Input('heatmap-class-filter', 'value'),
-        Input('heatmap-grid-size', 'value')
+        Input('heatmap-grid-size', 'value'),
+        Input('store-df-all', 'data')
     )
-    def update_heatmap(selected_class, grid_size):
-        # 클래스 필터링
-        df = df_all if selected_class == 'All' else df_all[df_all['class'] == selected_class]
+    def update_heatmap(selected_class, grid_size, df_all_json):
+        if not df_all_json:
+            return dash.no_update
+        df_all = pd.read_json(df_all_json, orient='split')
+        df = df_all if selected_class == 'All' else df_all[df_all['class'] == selected_class] 
         df = df.dropna(subset=['xmin_norm', 'xmax_norm', 'ymin_norm', 'ymax_norm'])
 
         # 히트맵 데이터 계산
@@ -220,56 +301,17 @@ def register_callbacks(app):
         return fig
 
     @app.callback(
-        Output('thumbnail-gallery', 'children'), # *이미지 썸네일 목록
-        Input('heatmap', 'clickData'), # *히트맵 클릭 좌표
-        Input('main-tabs', 'value'), # *현재 탭
-        State('heatmap-class-filter', 'value'), # *클래스 필터
-        State('heatmap-grid-size', 'value') # *히트맵 해상도
-    )
-    def show_thumbnails(clickData, current_tab, sel_class, grid_size):
-        # *히트맵 탭 아니거나, 클릭 안한경우
-        if current_tab != 'tab-heatmap' or not clickData:
-            return []
-        # *클릭된 셀의 좌표
-        gx = int(clickData['points'][0]['x'])
-        gy = int(clickData['points'][0]['y'])
-        
-        # *클래스 필터링
-        df = df_all.copy() if sel_class == 'All' else df_all[df_all['class'] == sel_class]
-
-        # *바운딩박스 중심좌표로 계산
-        x0 = gx / grid_size
-        x1 = (gx + 1) / grid_size
-        y0 = gy / grid_size
-        y1 = (gy + 1) / grid_size
-
-        matched = df[
-            (df['xmax_norm'] >= x0) & (df['xmin_norm'] <= x1) &
-            (df['ymax_norm'] >= y0) & (df['ymin_norm'] <= y1)
-        ]
-
-        return [
-            html.Img(
-                src=get_image_thumbnail(fname),
-                id={'type': 'thumb', 'index': fname},
-                style={'cursor': 'pointer'}
-            )
-            for fname in matched['filename'].unique()]
-
-    @app.callback(
         Output('bbox-info', 'children'), # *bbox 정보 리스트
         Input('image-display', 'clickData'), # *클릭 정보
         State('image-dropdown', 'value'), # *선택된 이미지 파일명
+        Input('store-df-all', 'data'),  
         prevent_initial_call=True
     )
-    def on_bbox_click(clickData, filename):
-        # *클릭 데이터 없거나 형식 잘못된 경우
-        if not clickData or 'points' not in clickData:
+    def on_bbox_click(clickData, filename, df_all_json):
+        if not clickData or 'points' not in clickData or not df_all_json:
             return []
-        # *클릭한 위치의 좌표
+        df_all = pd.read_json(df_all_json, orient='split')
         x, y = clickData['points'][0]['x'], clickData['points'][0]['y']
-
-        # *클릭 위치의 bbox 박스 찾기
         match = df_all[
             (df_all['filename'] == filename) &
             (df_all['xmin'] <= x) & (df_all['xmax'] >= x) &
@@ -308,10 +350,14 @@ def register_callbacks(app):
         Input('center-scatter', 'clickData'), # *산점도 클릭
         Input({'type': 'thumb', 'index': dash.ALL}, 'n_clicks'), # *썸네일 이미지 클릭
         State({'type': 'thumb', 'index': dash.ALL}, 'id'), # *썸네일 ID
+        Input('store-df-all', 'data'),
         prevent_initial_call=True
     )
-    def update_image_dropdown(scatter_click, n_clicks, ids):
+    def update_image_dropdown(scatter_click, n_clicks, ids, df_all_json):
         global selected_bbox_index
+        if not df_all_json:
+            return dash.no_update
+        df_all = pd.read_json(df_all_json, orient='split')
         # *산점도 클릭한 경우
         if ctx.triggered_id == 'center-scatter' and scatter_click:
             fn = scatter_click['points'][0]['customdata'][0]
@@ -326,18 +372,21 @@ def register_callbacks(app):
             return ctx.triggered_id['index']
         return dash.no_update
 
+
     @app.callback(
         Output('duplicate-table', 'data'), # * 중복 검사 결과 테이블 데이터
         Input('btn-duplicate-check', 'n_clicks'), # *검사 시작 버튼 클릭
         State('dup-threshold', 'value'), # *좌표 차이 임계값
         State('dup-type-filter', 'value'), # *비교 타입
+        Input('store-df-all', 'data'),
         prevent_initial_call=True
     )
-    def check_duplicate_boxes(n_clicks, threshold, type_filters):
-        global duplicate_box_dict
-        duplicate_box_dict = {}
+    def check_duplicate_boxes(n_clicks, threshold, type_filters, df_all_json):
+        global duplicate_box_dict  
+        if not df_all_json:
+            return []
+        df_all = pd.read_json(df_all_json, orient='split')
         rows = []
-        
         # *중복 바운딩박스 검사
         for fn in sorted(df_all['filename'].unique()):
             df_img = df_all[df_all['filename'] == fn]
@@ -386,13 +435,18 @@ def register_callbacks(app):
         State('duplicate-table', 'data'),
         State('duplicate-table', 'page_current'),
         State('duplicate-table', 'page_size'),
+        Input('store-df-all', 'data'), 
         prevent_initial_call=True
     )
-    def click_dup_table(active_cell, table_data, page_current, page_size):
+    def click_dup_table(active_cell, table_data, page_current, page_size, df_all_json):
+        if not df_all_json:
+            return dash.no_update
+        # (df_all을 써야 하면 pd.read_json(df_all_json, orient='split') 해주면 됨)
         if active_cell:
             idx = page_current * page_size + active_cell['row']
             return table_data[idx]['filename'] if idx < len(table_data) else dash.no_update
         return dash.no_update
+
 
     @app.callback(
         Output('conditional-display', 'style'),
@@ -419,16 +473,18 @@ def register_callbacks(app):
         Output('image-dropdown', 'options'),
         Input('main-tabs', 'value'),
         Input('duplicate-table', 'data'),
+        Input('store-df-all', 'data')
     )
-    def update_dropdown_options(current_tab, dup_table_data):
+    def update_dropdown_options(current_tab, dup_table_data, df_all_json):
+        if not df_all_json:
+            return []
+        df_all = pd.read_json(df_all_json, orient='split')
         if current_tab == 'tab-duplicate' and dup_table_data:
-            # *중복 검사 결과에 등장한 파일만 추출
             filenames = sorted(set(item['filename'] for item in dup_table_data))
         else:
-            # *전체 목록 사용 (default)
             filenames = sorted(df_all['filename'].unique())
-
         return [{'label': f, 'value': f} for f in filenames]
+
 
     @app.callback(
         Output('image-dropdown', 'style'),
@@ -461,3 +517,30 @@ def register_callbacks(app):
         if tab != 'tab-summary':
             return None  # 요약 탭 외에서는 초기화
         return dash.no_update  # 요약 탭이면 값 유지
+
+    @app.callback(
+        Output('pie-fig', 'figure'),
+        Input('store-df-all', 'data')
+    )
+    def update_pie_fig(df_all_json):
+        import io
+        if not df_all_json:
+            # 빈 Figure라도 반환
+            import plotly.graph_objects as go
+            return go.Figure()
+        df_all = pd.read_json(io.StringIO(df_all_json), orient='split')
+        value_counts = df_all['class'].value_counts()
+        if value_counts.empty:
+            import plotly.graph_objects as go
+            return go.Figure()
+        fig = px.pie(
+            names=value_counts.index,
+            values=value_counts.values,
+            title='클래스별 바운딩박스 비율',
+            hole=0.4
+        )
+        fig.update_traces(textinfo='percent+label', pull=0.01)
+        fig.update_layout(margin=dict(l=10, r=10, t=40, b=10))
+        return fig
+#
+#

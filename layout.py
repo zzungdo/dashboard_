@@ -1,5 +1,5 @@
 from dash import html, dcc, dash_table
-from utils import df_all, df_summary, class_stats, pie_fig
+# !from utils import df_all, df_summary, class_stats, pie_fig
 
 # DASH 기본 구성 요소의 스타일
 DEFAULT_STYLES = {
@@ -34,34 +34,78 @@ HIDDEN_STYLE = {'display': 'none'}
 
 def create_layout():
     return html.Div([
-        # *페이지 상단 제목
-        html.H2("Dataset 분석/통계 시각화"),
-        # *탭 구성
-        dcc.Tabs(id='main-tabs', value='tab-analysis', children=[
 
-            # *산점도탭
+        html.Div( 
+                    id='loading-alert',
+                    children="로딩 중입니다. 잠시만 기다려주세요...",
+                    style={
+                        'display': 'none',
+                        'position': 'fixed',
+                        'top': '40%',
+                        'left': '50%',
+                        'transform': 'translate(-50%, -50%)',
+                        'backgroundColor': 'rgba(0,0,0,0.85)',
+                        'color': 'white',
+                        'fontSize': '2em',
+                        'padding': '40px',
+                        'zIndex': 2000,
+                        'borderRadius': '12px'
+                    }
+                ),
+        dcc.Store(id='store-loading'),
+
+
+        # 상단: 경로 입력 + 적용 버튼 + Store
+        html.Div([
+            html.Label('GT 폴더:', style={'fontWeight': 'bold'}),
+            dcc.Input(id='input-gt-path', type='text', placeholder='./gt', style={'width': '300px', 'height' : '50px'}),
+            html.Label('Image 폴더:', style={'fontWeight': 'bold', 'marginLeft': '20px'}),
+            dcc.Input(id='input-img-path', type='text', placeholder='./images', style={'width': '300px', 'height' : '50px'}),
+            html.Button('적용', id='btn-set-path', style={'width': '50px', 'height' : '50px','marginLeft': '10px', 'color': 'black'}),
+        ], style={'position': 'absolute', 'top': '15px', 'right': '30px', 'zIndex': 999, 'background': '#fff', 'padding': '5px', 'borderRadius': '6px'}),
+        
+
+        dcc.Loading(
+            id="loading-table",
+            type="circle",  # "dot" "cube" 등도 가능
+            fullscreen=True,  # 화면 전체 오버레이
+            color="#d9534f",  # 스피너 색상 (예시)
+            children=[
+                dash_table.DataTable(id="summary-table"),
+                dash_table.DataTable(id="class-summary-table"),
+            ]
+        ),
+
+        dcc.Store(id='store-paths'),   # 폴더 경로 저장
+        dcc.Store(id='store-df-all'), # 전체 GT+Image DataFrame 저장(json)
+        dcc.Store(id='store-summary'), # 요약 데이터 저장(json)
+        dcc.Store(id='store-class-stats'), # 클래스 통계 저장(json)
+        dcc.Store(id='store-pie-fig'),     # 파이차트(fig.to_json()) 저장
+
+        html.H1("Dataset 분석/통계 시각화"),
+
+        dcc.Tabs(id='main-tabs', value='tab-analysis', children=[
             dcc.Tab(label='산점도', value='tab-analysis', children=[
                 dcc.Graph(id='center-scatter', figure={})
             ]),
-
-            # *히트맵 탭
             dcc.Tab(label='히트맵', value='tab-heatmap', children=[
                 html.Div([
                     html.Label('클래스 필터:'),
                     dcc.Dropdown(
                         id='heatmap-class-filter',
-                        options=[{'label': 'All', 'value': 'All'}] + [{'label': c, 'value': c} for c in sorted(df_all['class'].unique())],
+                        options=[{'label': 'All', 'value': 'All'}],
                         value='All', clearable=False, style={'width': '200px'}
                     ),
                     html.Br(), html.Label('그리드 사이즈:'), 
-                    dcc.Input(id='heatmap-grid-size', type='number', value=10, min=5, step=1, style={'width': '100px'})
+                    dcc.Input(id='heatmap-grid-size', type='number', value=5, min=1, step=1, style={'width': '100px'})
                 ], style={'margin': '10px'}),
                 dcc.Graph(id='heatmap')
             ]),
-
-            # *클래스 분포 및 통계 탭
             dcc.Tab(label='클래스 분포 / 통계', value='tab-stats', children=[
-                html.Div(dcc.Graph(figure=pie_fig, style={'width': '700px', 'height': '700px'}), style={'display': 'flex', 'justifyContent': 'center'}),
+                html.Div(
+                    dcc.Graph(id='pie-fig', style={'width': '700px', 'height': '700px'}),
+                    style={'display': 'flex', 'justifyContent': 'center'}
+                ),
                 html.Br(), html.H4('클래스별 바운딩박스 통계표'),
                 dash_table.DataTable(
                     id='class-summary-table',
@@ -72,15 +116,13 @@ def create_layout():
                         {'name': '포함 이미지 수', 'id': 'image_count'},
                         {'name': '이미지당 평균 개수', 'id': 'avg_per_image'}
                     ],
-                    data=class_stats.to_dict('records'),
+                    data=[],
                     style_table={'width': '100%', 'margin': '0 auto'},
                     style_cell={'textAlign': 'center'},
                     style_header={'fontWeight': 'bold'},
                     sort_action='native'
                 )
             ]),
-            
-            # *이미지별 바운딩박스 요약 / 확인 탭
             dcc.Tab(label='이미지 요약 / 확인', value='tab-summary', children=[
                 dash_table.DataTable(
                     id='summary-table',
@@ -90,11 +132,11 @@ def create_layout():
                         {'name': '클래스 다양성', 'id': 'unique_classes'},
                         {'name': '포함된 클래스', 'id': 'included_classes'}
                     ],
-                    data=df_summary.to_dict('records'),
+                    data=[],
                     page_current=0, page_size=15,
                     row_selectable='single', sort_action='native', 
                     style_table={'overflowX': 'auto'},
-                    style_cell={'textAlign': 'center','whiteSpace': 'nowrap'},
+                    style_cell={'textAlign': 'center', 'whiteSpace': 'nowrap'},
                     style_header={'fontWeight': 'bold'},
                     style_data_conditional=[{'if': {'state': 'selected'}, 'backgroundColor': '#D2F3FF', 'border': '1px solid #0074D9'}],
                     style_cell_conditional=[
@@ -109,8 +151,6 @@ def create_layout():
                     ]
                 )
             ]),
-
-            # *데이터 검사 탭
             dcc.Tab(label='데이터 검사', value='tab-duplicate', children=[
                 html.Div([
                     html.H4('GT 중복 바운딩박스 검사'),
@@ -143,47 +183,34 @@ def create_layout():
             ])
         ]),
 
-        # *탭 하단 구분선
         html.Hr(),
 
-        # *탭 아래 표시되는 영역들
         html.Div(id='conditional-display', children=[
             html.Div(id='thumbnail-gallery', style=DEFAULT_STYLES['thumbnail']),
             html.Div(id='bbox-title', children=[html.H3('Bounding Box Display')], style=DEFAULT_STYLES['title']),
-
-            # *클래스 필터 체크박스
             html.Div(id='class-filter-wrapper', children=[
                 html.Label('표시할 클래스 선택:'),
                 dcc.Checklist(
                     id='class-visibility-filter',
-                    options=[{'label': c, 'value': c} for c in sorted(df_all['class'].unique())],
-                    value=sorted(df_all['class'].unique()), inline=True, style={'marginBottom': '20px'}
+                    options=[], # 콜백으로 업데이트
+                    value=[],   # 콜백으로 업데이트
+                    inline=True, style={'marginBottom': '20px'}
                 )
             ], style=DEFAULT_STYLES['filter']),
-
-
-            # *이미지 선택 드롭다운 
             dcc.Dropdown(
                 id='image-dropdown',
-                options=[{'label': f, 'value': f} for f in sorted(df_all['filename'].unique())],
-                value = None,
+                options=[], # 콜백으로 업데이트
+                value=None,
                 style=DEFAULT_STYLES['dropdown']
             ),
-
-            # *선택된 이미지 파일명 출력
             html.Div(id='image-label-display', style={'marginTop': '5px', 'textAlign': 'center', 'fontWeight': 'bold'}),
-
             html.Br(),
-
-            # *이미지 + 바운딩박스 시각화 영역
             html.Div([
                 html.Div(id='bbox-instruction', children=[
                     html.Label('이미지 바운딩박스 시각화')
                 ], style=DEFAULT_STYLES['instruction']),
                 dcc.Graph(id='image-display', config={'scrollZoom': False, 'displayModeBar': True, 'displaylogo': False}, style=DEFAULT_STYLES['image_display'])
             ]),
-
-            # *바운딩박스 클릭 시 정보 출력
             html.Div(id='bbox-info', style=DEFAULT_STYLES['bbox_info'])
         ])
     ])
